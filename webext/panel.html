@@ -29,9 +29,8 @@
         border: 1px solid #333;
         pointer-events: none;
       }
-      #tilt-refresh {
+      #tilt-refresh, #tilt-reset {
         position: absolute;
-        top: 36px;
         left: 8px;
         padding: 4px 8px;
         background: rgba(0, 0, 0, 0.6);
@@ -41,11 +40,13 @@
         font-family: inherit;
         font-size: 12px;
       }
-      #tilt-refresh:hover {
+      #tilt-refresh { top: 36px; }
+      #tilt-reset   { top: 64px; }
+      #tilt-refresh:hover, #tilt-reset:hover {
         background: rgba(30, 30, 40, 0.9);
         border-color: #555;
       }
-      #tilt-refresh:disabled {
+      #tilt-refresh:disabled, #tilt-reset:disabled {
         opacity: 0.4;
         cursor: default;
       }
@@ -104,6 +105,7 @@
     <canvas id="tilt-canvas"></canvas>
     <div id="tilt-status">Tilt: waiting for inspected tab...</div>
     <button id="tilt-refresh" title="Re-walk DOM (R)" disabled>↻ Refresh</button>
+    <button id="tilt-reset" title="Reset view (Home)">⌂ Reset view</button>
     <div id="tilt-source-view" hidden>
       <div class="tilt-source-header">
         <span id="tilt-source-title"></span>
@@ -111,7 +113,6 @@
       </div>
       <pre id="tilt-source-body"></pre>
     </div>
-    <script src="chrome-shim.js"></script>
     <script src="Tilt-engine.js"></script>
     <script src="panel.js"></script>
   </body>

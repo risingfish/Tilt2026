@@ -9297,17 +9297,12 @@ Tilt.Profiler.intercept("Tilt.UI", Tilt.UI);
  ***** END LICENSE BLOCK *****/
 "use strict";
 
-/*global Components */
-
-if ("undefined" === typeof Cc) {
-  var Cc = Components.classes;
-}
-if ("undefined" === typeof Ci) {
-  var Ci = Components.interfaces;
-}
-if ("undefined" === typeof Cu) {
-  var Cu = Components.utils;
-}
+// Chrome/XPCOM Components handles removed for browser-extension / standalone use.
+// The downstream Tilt.Console/StringBundle/File/Preferences methods that use Cc/Ci/Cu
+// are only invoked in error paths that the webext panel never hits.
+if ("undefined" === typeof Cc) { var Cc = {}; }
+if ("undefined" === typeof Ci) { var Ci = {}; }
+if ("undefined" === typeof Cu) { var Cu = { import: function(){} }; }
 /***** BEGIN LICENSE BLOCK *****
  * Version: MPL 1.1/GPL 2.0/LGPL 2.1
  *
