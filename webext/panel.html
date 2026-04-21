@@ -29,11 +29,88 @@
         border: 1px solid #333;
         pointer-events: none;
       }
+      #tilt-refresh {
+        position: absolute;
+        top: 36px;
+        left: 8px;
+        padding: 4px 8px;
+        background: rgba(0, 0, 0, 0.6);
+        border: 1px solid #333;
+        color: #ddd;
+        cursor: pointer;
+        font-family: inherit;
+        font-size: 12px;
+      }
+      #tilt-refresh:hover {
+        background: rgba(30, 30, 40, 0.9);
+        border-color: #555;
+      }
+      #tilt-refresh:disabled {
+        opacity: 0.4;
+        cursor: default;
+      }
+      #tilt-source-view {
+        position: absolute;
+        right: 8px;
+        top: 8px;
+        bottom: 8px;
+        width: 45%;
+        min-width: 320px;
+        display: flex;
+        flex-direction: column;
+        background: rgba(10, 10, 14, 0.95);
+        border: 1px solid #444;
+        border-radius: 3px;
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6);
+      }
+      #tilt-source-view[hidden] {
+        display: none;
+      }
+      .tilt-source-header {
+        display: flex;
+        align-items: center;
+        padding: 6px 8px;
+        background: #1c1c22;
+        border-bottom: 1px solid #333;
+      }
+      #tilt-source-title {
+        flex: 1;
+        color: #9cf;
+      }
+      #tilt-source-close {
+        background: transparent;
+        border: none;
+        color: #ccc;
+        font-size: 16px;
+        cursor: pointer;
+        padding: 0 6px;
+      }
+      #tilt-source-close:hover {
+        color: #fff;
+      }
+      #tilt-source-body {
+        margin: 0;
+        padding: 8px;
+        flex: 1;
+        overflow: auto;
+        white-space: pre-wrap;
+        word-break: break-word;
+        font-size: 11px;
+        line-height: 1.4;
+      }
     </style>
   </head>
   <body>
     <canvas id="tilt-canvas"></canvas>
     <div id="tilt-status">Tilt: waiting for inspected tab...</div>
+    <button id="tilt-refresh" title="Re-walk DOM (R)" disabled>↻ Refresh</button>
+    <div id="tilt-source-view" hidden>
+      <div class="tilt-source-header">
+        <span id="tilt-source-title"></span>
+        <button id="tilt-source-close" title="Close (Esc)">×</button>
+      </div>
+      <pre id="tilt-source-body"></pre>
+    </div>
     <script src="chrome-shim.js"></script>
     <script src="Tilt-engine.js"></script>
     <script src="panel.js"></script>

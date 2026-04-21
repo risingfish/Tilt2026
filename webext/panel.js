@@ -8,6 +8,12 @@ const tiltState = {
   arcball: null,
   dom: null,
   t: 0,
+  sceneMatrix: null,
+  hoveredIndex: null,
+  sourceView: null,
+  sourceTitle: null,
+  sourceBody: null,
+  refreshBtn: null,
 };
 
 const STACK_STEP = 10;
@@ -65,10 +71,68 @@ const attachArcballInput = () => {
     ev.preventDefault();
     arcball.zoom(-ev.deltaY);
   }, { passive: false });
+
+  // Hover picking: only when no mouse buttons are held (don't pick while dragging).
+  canvas.addEventListener("mousemove", (ev) => {
+    if (ev.buttons !== 0) return;
+    const [x, y] = localCoords(ev);
+    updateHover(x, y);
+  });
+  canvas.addEventListener("mouseleave", () => {
+    if (tiltState.hoveredIndex !== null) {
+      tiltState.hoveredIndex = null;
+      if (tiltState.dom) setStatus(`${tiltState.dom.nodes.length} nodes loaded`);
+    }
+  });
+
+  canvas.addEventListener("dblclick", () => {
+    const idx = tiltState.hoveredIndex;
+    if (idx === null || !tiltState.dom) return;
+    inspectNode(tiltState.dom.nodes[idx]);
+  });
+};
+
+const showSource = (title, body) => {
+  tiltState.sourceTitle.textContent = title;
+  tiltState.sourceBody.textContent = body;
+  tiltState.sourceBody.scrollTop = 0;
+  tiltState.sourceView.hidden = false;
+};
+
+const hideSource = () => {
+  tiltState.sourceView.hidden = true;
+};
+
+const inspectNode = async (node) => {
+  const label = formatNodeLabel(node);
+  if (!browser.devtools?.inspectedWindow) {
+    showSource(label, "(no devtools.inspectedWindow available)");
+    return;
+  }
+  const fetchFn = (path) => {
+    let el = document.documentElement;
+    for (const i of path) {
+      if (!el || !el.children[i]) return null;
+      el = el.children[i];
+    }
+    return el ? el.outerHTML : null;
+  };
+  const expr = `(${fetchFn.toString()})(${JSON.stringify(node.path)})`;
+  showSource(label, "loading...");
+  try {
+    const [html, exceptionInfo] = await browser.devtools.inspectedWindow.eval(expr);
+    if (exceptionInfo) {
+      showSource(label, `error: ${exceptionInfo.value ?? exceptionInfo.description ?? "unknown"}`);
+      return;
+    }
+    showSource(label, html ?? "(node not found — DOM may have changed since last walk)");
+  } catch (err) {
+    showSource(label, `eval rejected: ${err?.message ?? err}`);
+  }
 };
 
 const drawMesh = () => {
-  const { dom, renderer: r, arcball } = tiltState;
+  const { dom, renderer: r, arcball, hoveredIndex } = tiltState;
   const { pageWidth: pageW, pageHeight: pageH, nodes } = dom;
   const canvasW = r.width;
   const canvasH = r.height;
@@ -85,14 +149,90 @@ const drawMesh = () => {
   r.scale(fit, fit, fit);
   r.translate(-pageW / 2, -pageH / 2, 0);
 
-  for (const n of nodes) {
+  // Snapshot the scene matrix (proj * mv) *before* any per-node pushMatrix
+  // so picking can project page-space points to screen-space.
+  tiltState.sceneMatrix = mat4.multiply(r.projMatrix, r.mvMatrix, mat4.create());
+
+  for (let i = 0; i < nodes.length; i++) {
+    const n = nodes[i];
     const color = DEPTH_PALETTE[n.depth % DEPTH_PALETTE.length];
+    const isHovered = i === hoveredIndex;
     r.pushMatrix();
     r.translate(n.x + n.w / 2, n.y + n.h / 2, n.depth * STACK_STEP);
-    r.fill(`${color}59`);
-    r.stroke(`${color}cc`);
+    r.fill(isHovered ? `${color}a6` : `${color}59`);
+    r.stroke(isHovered ? "#ffffffff" : `${color}cc`);
     r.box(n.w, n.h, STACK_STEP * 0.9);
     r.popMatrix();
+  }
+};
+
+const projectToScreen = (x, y, z, mat, canvasW, canvasH) => {
+  const out = [0, 0, 0, 0];
+  mat4.multiplyVec4(mat, [x, y, z, 1], out);
+  if (out[3] === 0) return null;
+  const invW = 1 / out[3];
+  return [
+    (out[0] * invW + 1) * 0.5 * canvasW,
+    (1 - out[1] * invW) * 0.5 * canvasH,
+  ];
+};
+
+// Point-in-convex-quad via consistent cross-product sign.
+// Quad vertices are assumed in order (either CW or CCW).
+const pointInQuad = (px, py, q) => {
+  const cross = (a, b) => (b[0] - a[0]) * (py - a[1]) - (b[1] - a[1]) * (px - a[0]);
+  const s0 = cross(q[0], q[1]);
+  const s1 = cross(q[1], q[2]);
+  const s2 = cross(q[2], q[3]);
+  const s3 = cross(q[3], q[0]);
+  const hasNeg = s0 < 0 || s1 < 0 || s2 < 0 || s3 < 0;
+  const hasPos = s0 > 0 || s1 > 0 || s2 > 0 || s3 > 0;
+  return !(hasNeg && hasPos);
+};
+
+const formatNodeLabel = (n) => {
+  const id = n.id ? `#${n.id}` : "";
+  const cls = n.cls ? `.${n.cls.trim().split(/\s+/).join(".")}` : "";
+  return `<${n.tag}${id}${cls}>`;
+};
+
+const updateHover = (mouseX, mouseY) => {
+  const { dom, sceneMatrix, renderer: r } = tiltState;
+  if (!dom || !sceneMatrix) return;
+  const canvasW = r.width;
+  const canvasH = r.height;
+  const nodes = dom.nodes;
+
+  let bestIdx = null;
+  let bestDepth = -1;
+  let bestArea = Infinity;
+
+  for (let i = 0; i < nodes.length; i++) {
+    const n = nodes[i];
+    const zTop = n.depth * STACK_STEP + (STACK_STEP * 0.9) / 2;
+    const p0 = projectToScreen(n.x, n.y, zTop, sceneMatrix, canvasW, canvasH);
+    const p1 = projectToScreen(n.x + n.w, n.y, zTop, sceneMatrix, canvasW, canvasH);
+    const p2 = projectToScreen(n.x + n.w, n.y + n.h, zTop, sceneMatrix, canvasW, canvasH);
+    const p3 = projectToScreen(n.x, n.y + n.h, zTop, sceneMatrix, canvasW, canvasH);
+    if (!p0 || !p1 || !p2 || !p3) continue;
+
+    if (pointInQuad(mouseX, mouseY, [p0, p1, p2, p3])) {
+      const area = n.w * n.h;
+      if (n.depth > bestDepth || (n.depth === bestDepth && area < bestArea)) {
+        bestIdx = i;
+        bestDepth = n.depth;
+        bestArea = area;
+      }
+    }
+  }
+
+  if (tiltState.hoveredIndex !== bestIdx) {
+    tiltState.hoveredIndex = bestIdx;
+    if (bestIdx !== null) {
+      setStatus(`${formatNodeLabel(nodes[bestIdx])} (depth ${nodes[bestIdx].depth})`);
+    } else {
+      setStatus(`${nodes.length} nodes loaded`);
+    }
   }
 };
 
@@ -137,6 +277,7 @@ function __tiltCollectDom() {
     document.body ? document.body.scrollHeight : 0,
   );
 
+  const path = [];
   const walk = (el, depth) => {
     const { left, top, width, height } = el.getBoundingClientRect();
     if (width > 0 && height > 0) {
@@ -149,10 +290,13 @@ function __tiltCollectDom() {
         y: top + scrollY,
         w: width,
         h: height,
+        path: path.slice(),
       });
     }
-    for (const child of el.children) {
-      walk(child, depth + 1);
+    for (let i = 0; i < el.children.length; i++) {
+      path.push(i);
+      walk(el.children[i], depth + 1);
+      path.pop();
     }
   };
 
@@ -168,6 +312,7 @@ const collectDom = async () => {
     return;
   }
   const expr = `(${__tiltCollectDom.toString()})()`;
+  if (tiltState.refreshBtn) tiltState.refreshBtn.disabled = true;
   try {
     const [value, exceptionInfo] = await browser.devtools.inspectedWindow.eval(expr);
     if (exceptionInfo) {
@@ -184,15 +329,43 @@ const collectDom = async () => {
     console.log("[tilt] full result stored at tiltState.dom");
   } catch (err) {
     setStatus(`eval rejected: ${err?.message ?? err}`);
+  } finally {
+    if (tiltState.refreshBtn) tiltState.refreshBtn.disabled = false;
   }
+};
+
+const refreshDom = () => {
+  if (!tiltState.tabId) return;
+  tiltState.hoveredIndex = null;
+  hideSource();
+  collectDom();
 };
 
 window.addEventListener("DOMContentLoaded", () => {
   tiltState.canvas = document.getElementById("tilt-canvas");
   tiltState.status = document.getElementById("tilt-status");
+  tiltState.sourceView = document.getElementById("tilt-source-view");
+  tiltState.sourceTitle = document.getElementById("tilt-source-title");
+  tiltState.sourceBody = document.getElementById("tilt-source-body");
+  tiltState.refreshBtn = document.getElementById("tilt-refresh");
+  document.getElementById("tilt-source-close").addEventListener("click", hideSource);
+  tiltState.refreshBtn.addEventListener("click", refreshDom);
   resizeCanvas();
   setStatus("panel loaded, starting renderer");
   startRenderer();
+  browser.devtools?.network?.onNavigated.addListener(() => {
+    if (tiltState.tabId) refreshDom();
+  });
+});
+
+window.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape" && tiltState.sourceView && !tiltState.sourceView.hidden) {
+    hideSource();
+    return;
+  }
+  if ((ev.key === "r" || ev.key === "R") && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
+    refreshDom();
+  }
 });
 
 window.addEventListener("resize", resizeCanvas);
@@ -202,6 +375,7 @@ window.addEventListener("message", (event) => {
   if (!msg || msg.type !== "tilt:init") return;
   if (tiltState.tabId === msg.tabId) return;
   tiltState.tabId = msg.tabId;
+  if (tiltState.refreshBtn) tiltState.refreshBtn.disabled = false;
   setStatus(`attached to tab ${msg.tabId}, walking DOM...`);
   collectDom();
 });
