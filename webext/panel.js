@@ -14,6 +14,7 @@ const tiltState = {
   sourceTitle: null,
   sourceBody: null,
   refreshBtn: null,
+  pageTexture: null,
 };
 
 const STACK_STEP = 10;
@@ -153,6 +154,11 @@ const drawMesh = () => {
   // so picking can project page-space points to screen-space.
   tiltState.sceneMatrix = mat4.multiply(r.projMatrix, r.mvMatrix, mat4.create());
 
+  const { pageTexture } = tiltState;
+  const texReady = pageTexture?.loaded;
+  const boxD = STACK_STEP * 0.9;
+  const topFaceZ = boxD / 2 + 0.5; // small epsilon above top face to avoid z-fighting
+
   for (let i = 0; i < nodes.length; i++) {
     const n = nodes[i];
     const color = DEPTH_PALETTE[n.depth % DEPTH_PALETTE.length];
@@ -161,7 +167,16 @@ const drawMesh = () => {
     r.translate(n.x + n.w / 2, n.y + n.h / 2, n.depth * STACK_STEP);
     r.fill(isHovered ? `${color}a6` : `${color}59`);
     r.stroke(isHovered ? "#ffffffff" : `${color}cc`);
-    r.box(n.w, n.h, STACK_STEP * 0.9);
+    r.box(n.w, n.h, boxD);
+
+    if (texReady && n.uvBuffer) {
+      r.tint(isHovered ? "#ffffffff" : "#ffffffe6");
+      r.pushMatrix();
+      r.translate(-n.w / 2 + n.texDx, -n.h / 2 + n.texDy, topFaceZ);
+      r.image(pageTexture, 0, 0, n.texW, n.texH, n.uvBuffer);
+      r.popMatrix();
+    }
+
     r.popMatrix();
   }
 };
@@ -303,7 +318,15 @@ function __tiltCollectDom() {
   if (document.body) {
     walk(document.documentElement, 0);
   }
-  return { pageWidth, pageHeight, nodes: out };
+  return {
+    pageWidth,
+    pageHeight,
+    viewportX: scrollX,
+    viewportY: scrollY,
+    viewportW: window.innerWidth,
+    viewportH: window.innerHeight,
+    nodes: out,
+  };
 }
 
 const collectDom = async () => {
@@ -327,6 +350,7 @@ const collectDom = async () => {
     );
     console.log("[tilt] first 5 nodes:", value.nodes.slice(0, 5));
     console.log("[tilt] full result stored at tiltState.dom");
+    capturePage();
   } catch (err) {
     setStatus(`eval rejected: ${err?.message ?? err}`);
   } finally {
@@ -334,11 +358,106 @@ const collectDom = async () => {
   }
 };
 
+let pollTimer = null;
+let pollInFlight = false;
+
+const pollScroll = async () => {
+  if (pollInFlight) return;
+  if (!tiltState.tabId || !tiltState.dom || !browser.devtools?.inspectedWindow) return;
+  pollInFlight = true;
+  try {
+    const [value, exc] = await browser.devtools.inspectedWindow.eval(
+      "[window.scrollX||0, window.scrollY||0, window.innerWidth, window.innerHeight]",
+    );
+    if (exc || !value) return;
+    const [sx, sy, vw, vh] = value;
+    const { dom } = tiltState;
+    if (
+      sx === dom.viewportX && sy === dom.viewportY &&
+      vw === dom.viewportW && vh === dom.viewportH
+    ) return;
+    dom.viewportX = sx;
+    dom.viewportY = sy;
+    dom.viewportW = vw;
+    dom.viewportH = vh;
+    await capturePage();
+  } finally {
+    pollInFlight = false;
+  }
+};
+
+const startPolling = () => {
+  if (pollTimer !== null) return;
+  pollTimer = setInterval(pollScroll, 400);
+};
+
+const stopPolling = () => {
+  if (pollTimer === null) return;
+  clearInterval(pollTimer);
+  pollTimer = null;
+};
+
 const refreshDom = () => {
   if (!tiltState.tabId) return;
   tiltState.hoveredIndex = null;
+  tiltState.pageTexture = null;
   hideSource();
   collectDom();
+};
+
+// Clip each node's page rect to the viewport, then build a UV buffer that samples
+// only that clipped region. The drawn quad is also shrunk to match, which prevents
+// clamp-to-edge smearing when a node extends past the viewport bounds.
+const computeNodeUVs = () => {
+  const { dom } = tiltState;
+  if (!dom) return;
+  const { viewportX: vpX, viewportY: vpY, viewportW: vpW, viewportH: vpH, nodes } = dom;
+  const vpR = vpX + vpW;
+  const vpB = vpY + vpH;
+  for (const n of nodes) {
+    const cx0 = Math.max(n.x, vpX);
+    const cy0 = Math.max(n.y, vpY);
+    const cx1 = Math.min(n.x + n.w, vpR);
+    const cy1 = Math.min(n.y + n.h, vpB);
+    if (cx1 <= cx0 || cy1 <= cy0) {
+      n.uvBuffer = null;
+      continue;
+    }
+    n.texDx = cx0 - n.x;
+    n.texDy = cy0 - n.y;
+    n.texW = cx1 - cx0;
+    n.texH = cy1 - cy0;
+    const u0 = (cx0 - vpX) / vpW;
+    const u1 = (cx1 - vpX) / vpW;
+    const v0 = (cy0 - vpY) / vpH;
+    const v1 = (cy1 - vpY) / vpH;
+    n.uvBuffer = new Tilt.VertexBuffer([u0, v0, u1, v0, u0, v1, u1, v1], 2);
+  }
+};
+
+const capturePage = async () => {
+  if (!tiltState.tabId) return;
+  try {
+    const resp = await browser.runtime.sendMessage({
+      type: "tilt:capture",
+      tabId: tiltState.tabId,
+    });
+    if (!resp?.ok) {
+      console.warn("[tilt] capture failed:", resp?.error);
+      return;
+    }
+    const img = new Image();
+    img.addEventListener("load", () => {
+      tiltState.pageTexture = new Tilt.Texture(img);
+      computeNodeUVs();
+    });
+    img.addEventListener("error", () => {
+      console.warn("[tilt] capture image failed to decode");
+    });
+    img.src = resp.dataUrl;
+  } catch (err) {
+    console.warn("[tilt] capture error:", err);
+  }
 };
 
 window.addEventListener("DOMContentLoaded", () => {
@@ -355,6 +474,11 @@ window.addEventListener("DOMContentLoaded", () => {
   startRenderer();
   browser.devtools?.network?.onNavigated.addListener(() => {
     if (tiltState.tabId) refreshDom();
+  });
+  // Pause polling while the panel isn't visible to the user — saves CPU/battery.
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) stopPolling();
+    else if (tiltState.tabId) startPolling();
   });
 });
 
@@ -378,4 +502,5 @@ window.addEventListener("message", (event) => {
   if (tiltState.refreshBtn) tiltState.refreshBtn.disabled = false;
   setStatus(`attached to tab ${msg.tabId}, walking DOM...`);
   collectDom();
+  if (!document.hidden) startPolling();
 });
