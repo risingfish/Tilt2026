@@ -84,9 +84,19 @@ const resizeCanvas = () => {
   if (!c) return;
   const w = c.clientWidth | 0;
   const h = c.clientHeight | 0;
+  if (w === 0 || h === 0) return;
   if (c.width !== w || c.height !== h) {
     c.width = w;
     c.height = h;
+    const r = tiltState.renderer;
+    if (r) {
+      // Engine caches width/height on the renderer (used by r.perspective() every
+      // frame) and the GL viewport is fixed at context creation — both must be
+      // refreshed or the scene stays rendered at the original panel size.
+      r.width = w;
+      r.height = h;
+      r.gl?.viewport(0, 0, w, h);
+    }
     tiltState.arcball?.resize(w, h);
   }
 };
@@ -120,9 +130,9 @@ const selectNode = (idx) => {
 // Baseline tilt angle applied before the arcball rotation (matches drawMesh).
 const BASE_TILT = -0.3;
 
-// Unproject a canvas-space (cx, cy) to a page-space 3D point on the plane z = worldZ.
-// Uses the last-rendered sceneMatrix (proj * mv) so the ray matches what the user sees.
-const unprojectAtZ = (cx, cy, worldZ) => {
+// Build a page-space ray from canvas-space (cx, cy) using the last-rendered sceneMatrix.
+// Returns { origin, dir } or null.
+const pageRayFromCanvas = (cx, cy) => {
   const { sceneMatrix, renderer: r } = tiltState;
   if (!sceneMatrix || !r) return null;
   const inv = mat4.inverse(sceneMatrix, mat4.create());
@@ -136,13 +146,57 @@ const unprojectAtZ = (cx, cy, worldZ) => {
   if (near[3] === 0 || far[3] === 0) return null;
   near[0] /= near[3]; near[1] /= near[3]; near[2] /= near[3];
   far[0]  /= far[3];  far[1]  /= far[3];  far[2]  /= far[3];
-  const dz = far[2] - near[2];
-  if (Math.abs(dz) < 1e-9) return null;
-  const t = (worldZ - near[2]) / dz;
+  return {
+    origin: [near[0], near[1], near[2]],
+    dir: [far[0] - near[0], far[1] - near[1], far[2] - near[2]],
+  };
+};
+
+// Ray-AABB intersection (slab method). Returns tNear > 0 on hit or null.
+const rayAabb = (origin, dir, minB, maxB) => {
+  let tmin = -Infinity, tmax = Infinity;
+  for (let i = 0; i < 3; i++) {
+    const d = dir[i];
+    if (Math.abs(d) < 1e-9) {
+      if (origin[i] < minB[i] || origin[i] > maxB[i]) return null;
+    } else {
+      const inv = 1 / d;
+      let t1 = (minB[i] - origin[i]) * inv;
+      let t2 = (maxB[i] - origin[i]) * inv;
+      if (t1 > t2) { const tmp = t1; t1 = t2; t2 = tmp; }
+      if (t1 > tmin) tmin = t1;
+      if (t2 < tmax) tmax = t2;
+      if (tmin > tmax) return null;
+    }
+  }
+  return tmin >= 0 ? tmin : (tmax >= 0 ? tmax : null);
+};
+
+// Raycast the cursor against every box; return the closest hit point on any face,
+// or null if the ray misses the mesh entirely. This picks the exact visible 3D point
+// under the cursor (top face, side face — whichever the ray hits first).
+const pickMeshPoint = (cx, cy) => {
+  const { dom } = tiltState;
+  if (!dom) return null;
+  const ray = pageRayFromCanvas(cx, cy);
+  if (!ray) return null;
+  const boxD = STACK_STEP * 0.9;
+  const half = boxD / 2;
+  let bestT = Infinity;
+  let bestNodeIdx = -1;
+  for (let i = 0; i < dom.nodes.length; i++) {
+    const n = dom.nodes[i];
+    const cz = n.depth * STACK_STEP;
+    const minB = [n.x,       n.y,       cz - half];
+    const maxB = [n.x + n.w, n.y + n.h, cz + half];
+    const t = rayAabb(ray.origin, ray.dir, minB, maxB);
+    if (t !== null && t < bestT) { bestT = t; bestNodeIdx = i; }
+  }
+  if (!Number.isFinite(bestT)) return null;
   return [
-    near[0] + t * (far[0] - near[0]),
-    near[1] + t * (far[1] - near[1]),
-    worldZ,
+    ray.origin[0] + bestT * ray.dir[0],
+    ray.origin[1] + bestT * ray.dir[1],
+    ray.origin[2] + bestT * ray.dir[2],
   ];
 };
 
@@ -172,8 +226,15 @@ const setPivot = (newPivot) => {
   const dy = pROld[1] - pRNew[1];
   const dz = pROld[2] - pRNew[2];
 
+  // The engine's quat4.toMat4 (used in drawMesh for r.transform(rotMatrix)) stores the
+  // matrix so that column-major `M * v` rotates v by q^-1, not q. So the rotation
+  // visually applied to vertices is by the conjugate of lastRenderedRot. Compensation
+  // must use that same conjugate, or the further from identity the view is rotated,
+  // the more the mousedown jumps.
+  const lr = tiltState.lastRenderedRot;
+  const invRot = [-lr[0], -lr[1], -lr[2], lr[3]];
   const rd = [0, 0, 0];
-  quat4.multiplyVec3(tiltState.lastRenderedRot, [dx, dy, dz], rd);
+  quat4.multiplyVec3(invRot, [dx, dy, dz], rd);
   const ix = dx - rd[0];
   const iy = dy - rd[1];
   const iz = dz - rd[2];
@@ -181,9 +242,13 @@ const setPivot = (newPivot) => {
   // Apply Rx(BASE_TILT) to (I - R) * delta.
   const c = Math.cos(BASE_TILT);
   const s = Math.sin(BASE_TILT);
-  tiltState.pivotPan[0] += ix;
-  tiltState.pivotPan[1] += c * iy - s * iz;
-  tiltState.pivotPan[2] += s * iy + c * iz;
+  const compX = ix;
+  const compY = c * iy - s * iz;
+  const compZ = s * iy + c * iz;
+
+  tiltState.pivotPan[0] += compX;
+  tiltState.pivotPan[1] += compY;
+  tiltState.pivotPan[2] += compZ;
 };
 
 const attachArcballInput = () => {
@@ -202,19 +267,10 @@ const attachArcballInput = () => {
     downX = ev.clientX;
     downY = ev.clientY;
     const [x, y] = localCoords(ev);
-    // Left-button drag rotates around the 3D point on the top face of the hovered node.
-    // Clicks on empty space reset the pivot to page center. Either way, the view stays
-    // visually stable thanks to the pivotPan compensation.
+    // Left-button drag rotates around the exact 3D point on the mesh under the cursor.
+    // Ray-AABB cast against every box; pick the closest face hit. Miss = page-center pivot.
     if (ev.button === 0) {
-      const hIdx = tiltState.hoveredIndex;
-      if (hIdx !== null && tiltState.dom && tiltState.sceneMatrix) {
-        const n = tiltState.dom.nodes[hIdx];
-        const topZ = n.depth * STACK_STEP + (STACK_STEP * 0.9) / 2;
-        const hit = unprojectAtZ(x, y, topZ);
-        if (hit) setPivot(hit); else setPivot(null);
-      } else {
-        setPivot(null);
-      }
+      setPivot(pickMeshPoint(x, y));
     }
     arcball.mouseDown(x, y, mapButton(ev.button));
     // Engine's mouseMove only records while a button is held, so $mouseMove/$mouseLerp
