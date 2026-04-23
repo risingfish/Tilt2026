@@ -19,11 +19,18 @@ const tiltState = {
   sourceBody: null,
   refreshBtn: null,
   resetBtn: null,
+  showHiddenBtn: null,
+  // When true, hidden elements (display:none / visibility:hidden) render as ghost
+  // boxes at low alpha. They never get a top-face UV texture regardless.
+  showHidden: false,
   pageTexture: null,
   // Merged geometry: one draw call per palette bucket (fills), one for wireframe,
   // one textured quad mesh for top faces. Rebuilt on DOM walk / viewport change.
+  // Hidden geometry is kept in parallel arrays so it can be drawn at a different alpha.
   fillMeshes: null,
   wireframeMesh: null,
+  hiddenFillMeshes: null,
+  hiddenWireframeMesh: null,
   texMesh: null,
   // Rotation pivot. `pivot` is a page-space 3D point (null = rotate around page center).
   // `pivotPan` is a screen-space translation that compensates for pivot changes so the
@@ -64,6 +71,17 @@ const resetView = () => {
   a.$endVec[0] = a.$endVec[1] = a.$endVec[2] = 0;
   tiltState.pivot = null;
   tiltState.pivotPan[0] = tiltState.pivotPan[1] = tiltState.pivotPan[2] = 0;
+};
+
+const toggleShowHidden = () => {
+  tiltState.showHidden = !tiltState.showHidden;
+  if (tiltState.showHiddenBtn) {
+    tiltState.showHiddenBtn.setAttribute("aria-pressed", String(tiltState.showHidden));
+  }
+  // Rebuild merged geometry so hidden-element ghost boxes appear/disappear.
+  // Note: UV textures are already gated on n.hidden in computeNodeUVs, so hidden
+  // nodes never get a top-face texture regardless of this toggle.
+  if (tiltState.dom) buildMergedGeometry();
 };
 
 const STACK_STEP = 10;
@@ -408,6 +426,12 @@ const disposeMergedGeometry = () => {
   }
   disposeBuffers(tiltState.wireframeMesh, ["vertices", "indices"]);
   tiltState.wireframeMesh = null;
+  if (tiltState.hiddenFillMeshes) {
+    for (const m of tiltState.hiddenFillMeshes) disposeBuffers(m, ["vertices", "indices"]);
+    tiltState.hiddenFillMeshes = null;
+  }
+  disposeBuffers(tiltState.hiddenWireframeMesh, ["vertices", "indices"]);
+  tiltState.hiddenWireframeMesh = null;
 };
 
 const disposeTextureMesh = () => {
@@ -423,58 +447,85 @@ const buildMergedGeometry = () => {
   const boxD = STACK_STEP * 0.9;
   const bucketCount = DEPTH_PALETTE.length;
 
-  const fillVerts = Array.from({ length: bucketCount }, () => []);
-  const fillIdx = Array.from({ length: bucketCount }, () => []);
-  const fillBoxes = new Array(bucketCount).fill(0);
-  const wireVerts = [];
-  const wireIdx = [];
-  let wireBoxes = 0;
+  // Two parallel batches: visible + hidden. Hidden is only populated when the user
+  // has toggled "show hidden" on; it renders at lower alpha and never gets UVs.
+  const makeBatch = () => ({
+    fillVerts: Array.from({ length: bucketCount }, () => []),
+    fillIdx: Array.from({ length: bucketCount }, () => []),
+    fillBoxes: new Array(bucketCount).fill(0),
+    wireVerts: [],
+    wireIdx: [],
+    wireBoxes: 0,
+  });
+  const visible = makeBatch();
+  const hidden = makeBatch();
   let skipped = 0;
 
-  for (const n of nodes) {
+  const pushNode = (n, batch) => {
     const bucket = n.depth % bucketCount;
-    if (fillBoxes[bucket] >= MAX_BOXES_PER_FILL_BUCKET || wireBoxes >= MAX_BOXES_PER_WIRE_MESH) {
+    if (batch.fillBoxes[bucket] >= MAX_BOXES_PER_FILL_BUCKET || batch.wireBoxes >= MAX_BOXES_PER_WIRE_MESH) {
       skipped++;
-      continue;
+      return;
     }
     const cx = n.x + n.w / 2, cy = n.y + n.h / 2, cz = n.depth * STACK_STEP;
     const sx = n.w, sy = n.h, sz = boxD;
 
-    const fv = fillVerts[bucket];
-    const fi = fillIdx[bucket];
-    const base = fillBoxes[bucket] * 24;
+    const fv = batch.fillVerts[bucket];
+    const fi = batch.fillIdx[bucket];
+    const base = batch.fillBoxes[bucket] * 24;
     for (let i = 0; i < CUBE_VERTS.length; i += 3) {
       fv.push(CUBE_VERTS[i] * sx + cx, CUBE_VERTS[i + 1] * sy + cy, CUBE_VERTS[i + 2] * sz + cz);
     }
     for (let i = 0; i < CUBE_INDICES.length; i++) fi.push(CUBE_INDICES[i] + base);
-    fillBoxes[bucket]++;
+    batch.fillBoxes[bucket]++;
 
-    const wBase = wireBoxes * 8;
+    const wBase = batch.wireBoxes * 8;
     for (let i = 0; i < WIRE_VERTS.length; i += 3) {
-      wireVerts.push(WIRE_VERTS[i] * sx + cx, WIRE_VERTS[i + 1] * sy + cy, WIRE_VERTS[i + 2] * sz + cz);
+      batch.wireVerts.push(WIRE_VERTS[i] * sx + cx, WIRE_VERTS[i + 1] * sy + cy, WIRE_VERTS[i + 2] * sz + cz);
     }
-    for (let i = 0; i < WIRE_INDICES.length; i++) wireIdx.push(WIRE_INDICES[i] + wBase);
-    wireBoxes++;
+    for (let i = 0; i < WIRE_INDICES.length; i++) batch.wireIdx.push(WIRE_INDICES[i] + wBase);
+    batch.wireBoxes++;
+  };
+
+  for (const n of nodes) {
+    if (n.hidden) {
+      // Hidden nodes stay in dom.nodes so picking and the highlight overlay still
+      // work; when showHidden is off, we skip them from the merged mesh so they
+      // don't occlude the top-face UV textures of their visible ancestors.
+      if (tiltState.showHidden) pushNode(n, hidden);
+    } else {
+      pushNode(n, visible);
+    }
   }
   if (skipped > 0) console.warn(`[tilt] merged mesh skipped ${skipped} nodes (Uint16 limit)`);
 
-  const meshes = [];
-  for (let b = 0; b < bucketCount; b++) {
-    if (!fillVerts[b].length) { meshes.push(null); continue; }
-    meshes.push(new Tilt.Mesh({
-      vertices: new Tilt.VertexBuffer(fillVerts[b], 3),
-      indices: new Tilt.IndexBuffer(fillIdx[b]),
-      color: Tilt.Math.hex2rgba(`${DEPTH_PALETTE[b]}59`),
-      drawMode: r.TRIANGLES,
-    }));
-  }
-  tiltState.fillMeshes = meshes;
-  tiltState.wireframeMesh = wireVerts.length ? new Tilt.Mesh({
-    vertices: new Tilt.VertexBuffer(wireVerts, 3),
-    indices: new Tilt.IndexBuffer(wireIdx),
-    color: Tilt.Math.hex2rgba(MERGED_STROKE),
-    drawMode: r.LINES,
-  }) : null;
+  const buildBatch = (batch, alphaHex) => {
+    const meshes = [];
+    for (let b = 0; b < bucketCount; b++) {
+      if (!batch.fillVerts[b].length) { meshes.push(null); continue; }
+      meshes.push(new Tilt.Mesh({
+        vertices: new Tilt.VertexBuffer(batch.fillVerts[b], 3),
+        indices: new Tilt.IndexBuffer(batch.fillIdx[b]),
+        color: Tilt.Math.hex2rgba(`${DEPTH_PALETTE[b]}${alphaHex}`),
+        drawMode: r.TRIANGLES,
+      }));
+    }
+    const wire = batch.wireVerts.length ? new Tilt.Mesh({
+      vertices: new Tilt.VertexBuffer(batch.wireVerts, 3),
+      indices: new Tilt.IndexBuffer(batch.wireIdx),
+      color: Tilt.Math.hex2rgba(MERGED_STROKE),
+      drawMode: r.LINES,
+    }) : null;
+    return { meshes, wire };
+  };
+
+  const vis = buildBatch(visible, "59");
+  tiltState.fillMeshes = vis.meshes;
+  tiltState.wireframeMesh = vis.wire;
+
+  const hid = buildBatch(hidden, "33");
+  tiltState.hiddenFillMeshes = hid.meshes;
+  tiltState.hiddenWireframeMesh = hid.wire;
 };
 
 const buildTextureMesh = () => {
@@ -543,7 +594,7 @@ const drawMesh = () => {
   // so picking can project page-space points to screen-space.
   tiltState.sceneMatrix = mat4.multiply(r.projMatrix, r.mvMatrix, mat4.create());
 
-  const { pageTexture, fillMeshes, wireframeMesh, texMesh } = tiltState;
+  const { pageTexture, fillMeshes, wireframeMesh, texMesh, hiddenFillMeshes, hiddenWireframeMesh } = tiltState;
   const texReady = pageTexture?.loaded;
   const boxD = STACK_STEP * 0.9;
   const topFaceZ = boxD / 2 + 0.5;
@@ -555,6 +606,13 @@ const drawMesh = () => {
   }
   if (wireframeMesh) wireframeMesh.draw();
   if (texMesh) texMesh.draw();
+  // Hidden-element ghost geometry (only populated when showHidden is on). Drawn
+  // after the textured top faces so its low alpha blends on top without hiding
+  // texture data behind it.
+  if (hiddenFillMeshes) {
+    for (const m of hiddenFillMeshes) if (m) m.draw();
+  }
+  if (hiddenWireframeMesh) hiddenWireframeMesh.draw();
 
   // Highlight overlay: at most hovered + selected, drawn as individual boxes
   // with a small +z nudge so they paint on top of the merged geometry.
@@ -566,10 +624,11 @@ const drawMesh = () => {
   for (const h of highlights) {
     const n = nodes[h.idx];
     const color = DEPTH_PALETTE[n.depth % DEPTH_PALETTE.length];
+    const fillAlpha = n.hidden ? "33" : "a6";
     r.pushMatrix();
     // +0.5 along z nudges highlight box in front of its merged twin, avoiding z-fight.
     r.translate(n.x + n.w / 2, n.y + n.h / 2, n.depth * STACK_STEP + 0.5);
-    r.fill(`${color}a6`);
+    r.fill(`${color}${fillAlpha}`);
     r.stroke(h.kind === "selected" ? SELECTED_STROKE : "#ffffffff");
     r.box(n.w, n.h, boxD);
     if (texReady && n.uvBuffer) {
@@ -694,6 +753,7 @@ function __tiltCollectDom() {
   const walk = (el, depth) => {
     const { left, top, width, height } = el.getBoundingClientRect();
     if (width > 0 && height > 0) {
+      const style = window.getComputedStyle(el);
       out.push({
         tag: el.tagName.toLowerCase(),
         id: el.id || null,
@@ -703,6 +763,7 @@ function __tiltCollectDom() {
         y: top + scrollY,
         w: width,
         h: height,
+        hidden: style.display === "none" || style.visibility === "hidden",
         path: path.slice(),
       });
     }
@@ -839,6 +900,10 @@ const computeNodeUVs = () => {
   const vpR = vpX + vpW;
   const vpB = vpY + vpH;
   for (const n of nodes) {
+    if (n.hidden) {
+      n.uvBuffer = null;
+      continue;
+    }
     const cx0 = Math.max(n.x, vpX);
     const cy0 = Math.max(n.y, vpY);
     const cx1 = Math.min(n.x + n.w, vpR);
@@ -893,9 +958,11 @@ window.addEventListener("DOMContentLoaded", () => {
   tiltState.sourceBody = document.getElementById("tilt-source-body");
   tiltState.refreshBtn = document.getElementById("tilt-refresh");
   tiltState.resetBtn = document.getElementById("tilt-reset");
+  tiltState.showHiddenBtn = document.getElementById("tilt-show-hidden");
   document.getElementById("tilt-source-close").addEventListener("click", hideSource);
   tiltState.refreshBtn.addEventListener("click", refreshDom);
   tiltState.resetBtn.addEventListener("click", resetView);
+  tiltState.showHiddenBtn.addEventListener("click", toggleShowHidden);
   resizeCanvas();
   setStatus("panel loaded, starting renderer");
   startRenderer();

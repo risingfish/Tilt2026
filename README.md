@@ -7,6 +7,12 @@ Tilt is currently implemented natively in Firefox starting with version 11, part
 
 Take a look at [Firefox Aurora](http://www.mozilla.org/en-US/firefox/channel/) or [Firefox Nightly](http://nightly.mozilla.org/) to try out the new and improved Tilt!
 
+### Current development
+
+To run the plugin for development, use the following command from the projects root directory: `npx web-ext run --source-dir=/<YOUR_FULL_PATH>/Tilt/webext --profile-create-if-missing --firefox-profile=$HOME/tilt-dev-profile --keep-profile-changes --verbose` 
+
+To inspect a dev tools panel, use `about:debugging#/runtime/this-firefox` and find the new Tilt Addon in the list and click the inspect button.
+
 ### Help
 If you have any questions, ping anyone on IRC in `#devtools` or `#tilt` on [irc.mozilla.org](irc://irc.mozilla.org).
 

@@ -2,6 +2,11 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Absolutely must follow rule
+Under no circumstances should you guess and/or infer. If you do not know the answer, look up the library, framework, document, or anything else from the web and understand it. If you still cannot figure out a solution, always let me know, and I will help research.
+
+Always uses the latest version of an api, app, or famework when generating code.
+
 ## Project context
 
 Tilt is a legacy (circa 2011) Mozilla Firefox extension that renders a 3D WebGL visualization of a webpage's DOM. It predates WebExtensions — it is an XUL/XPI overlay extension (`chrome.manifest`, `install.rdf`, `browserOverlay.xul`) that was eventually superseded by a native implementation inside Firefox's Developer Tools Inspector. Assume targets are old Gecko (Firefox 4–11 era), ECMAScript 5 strict, and WebGL 1 / GLSL ES 1.0.

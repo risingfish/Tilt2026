@@ -29,7 +29,7 @@
         border: 1px solid #333;
         pointer-events: none;
       }
-      #tilt-refresh, #tilt-reset {
+      #tilt-refresh, #tilt-reset, #tilt-show-hidden {
         position: absolute;
         left: 8px;
         padding: 4px 8px;
@@ -40,13 +40,19 @@
         font-family: inherit;
         font-size: 12px;
       }
-      #tilt-refresh { top: 36px; }
-      #tilt-reset   { top: 64px; }
-      #tilt-refresh:hover, #tilt-reset:hover {
+      #tilt-refresh      { top: 36px; }
+      #tilt-reset        { top: 64px; }
+      #tilt-show-hidden  { top: 92px; }
+      #tilt-show-hidden[aria-pressed="true"] {
+        background: rgba(60, 50, 20, 0.9);
+        border-color: #ffcc33;
+        color: #ffcc33;
+      }
+      #tilt-refresh:hover, #tilt-reset:hover, #tilt-show-hidden:hover {
         background: rgba(30, 30, 40, 0.9);
         border-color: #555;
       }
-      #tilt-refresh:disabled, #tilt-reset:disabled {
+      #tilt-refresh:disabled, #tilt-reset:disabled, #tilt-show-hidden:disabled {
         opacity: 0.4;
         cursor: default;
       }
@@ -106,6 +112,7 @@
     <div id="tilt-status">Tilt: waiting for inspected tab...</div>
     <button id="tilt-refresh" title="Re-walk DOM (R)" disabled>↻ Refresh</button>
     <button id="tilt-reset" title="Reset view (Home)">⌂ Reset view</button>
+    <button id="tilt-show-hidden" title="Toggle display of hidden elements" aria-pressed="false">◌ Show hidden</button>
     <div id="tilt-source-view" hidden>
       <div class="tilt-source-header">
         <span id="tilt-source-title"></span>
