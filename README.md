@@ -2,6 +2,14 @@
 #### [Development Blog](http://blog.mozilla.com/tilt/)
 #### [Tilt Project Page](https://wiki.mozilla.org/Tilt_Project_Page)
 
+### Firefox Dev
+
+about:debugging#/runtime/this-firefox
+
+```shell
+npx web-ext run --source-dir=/home/zac/code/Tilt/webext --profile-create-if-missing --firefox-profile=$HOME/tilt-dev-profile --keep-profile-changes --verbose
+```
+
 ### Firefox integration
 Tilt is currently implemented natively in Firefox starting with version 11, part of the Developer Tools -> Inspector. You can track the development in the [mozilla-central branch](https://github.com/victorporof/Tilt/tree/mozilla-central). If you have a Bugzilla account, [here are all the known bugs and features](https://bugzilla.mozilla.org/buglist.cgi?cmdtype=runnamed&namedcmd=tilt&list_id=1947264) we're working on - you're welcome to file new requests in there or even help out if you want to!
 
